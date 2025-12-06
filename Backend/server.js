@@ -2,6 +2,7 @@ import express from "express";
 import dotenv from "dotenv";
 import connectDb from "./config/db.js";
 import classRoutes from "./routes/classRoutes.js";
+import cors from 'cors'
 
 // Agora token imports
 import pkg from "agora-access-token";
@@ -14,6 +15,7 @@ const app = express();
 
 // Middleware to parse JSON
 app.use(express.json());
+app.use(cors())
 
 // Connect to MongoDB
 connectDb();
