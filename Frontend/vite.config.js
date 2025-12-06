@@ -8,7 +8,7 @@ export default defineConfig({
   server : {
     proxy  : {
       '/api':{
-        target :'http://localhost:4000'
+        target :'https://edure-recording-backend.onrender.com' // https://edure-recording-backend.onrender.com   // http://localhost:4000
       }
     }
   }
