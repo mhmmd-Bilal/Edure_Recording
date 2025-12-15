@@ -1,16 +1,23 @@
 import mongoose from "mongoose";
 
-const roomSchema = new mongoose.Schema({
-  channelName: { type: String, required: true, unique: true },
-  hostId: { type: String, required: true },
-  pendingRequests: [
-    {
-      studentId: String,
-      studentName: String,
-      status: { type: String, default: "pending" }, // pending/approved/rejected
-    }
-  ]
+const StudentSchema = new mongoose.Schema({
+  studentId: { type: String },
+  name: { type: String, default: "Student" },
+  status: {
+    type: String,
+    enum: ["pending", "approved", "rejected"],
+    default: "pending",
+  },
+  requestedAt: { type: Date, default: Date.now },
 });
 
-const Room = mongoose.model("Room", roomSchema);
-export default Room;
+const ClassSchema = new mongoose.Schema({
+  tutorId: { type: String },
+  roomId: { type: String, required: true, unique: true },
+  title: { type: String, default: "Live Class" },
+  createdAt: { type: Date, default: Date.now },
+  students: [StudentSchema],
+  recording: { type: String },
+});
+
+export default mongoose.model("Class", ClassSchema);

@@ -1,22 +1,61 @@
 // WhiteBoard.jsx
-import React, { useState, useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import AgoraRTC from "agora-rtc-sdk-ng";
-import { useCreateRoomMutation } from "../slices/roomApiSlice";
+import {
+  useGenerateRoomTokenMutation,
+  useStartRecordingMutation,
+  useStopRecordingMutation,
+} from "../slices/roomApiSlice";
+import { useNavigate } from "react-router-dom";
 
-function WhiteBoard() {
+const RECORDER_UID = "1001";
+
+export default function WhiteBoard() {
   const [channelName, setChannelName] = useState("");
   const [joined, setJoined] = useState(false);
-  const [role, setRole] = useState("host");
-
-  const [createRoom] = useCreateRoomMutation();
+  const [role, setRole] = useState("");
+  const [classDetails, setClassDetails] = useState(null);
+  const [participants, setParticipants] = useState([]);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingInfo, setRecordingInfo] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("recordingInfo") || "null");
+    } catch {
+      return null;
+    }
+  });
 
   const client = useRef(null);
   const localTracksRef = useRef({ audio: null, video: null, screen: null });
-  const [participants, setParticipants] = useState([]);
   const containersRef = useRef({});
   const localContainerRef = useRef(null);
+  const startRecordingCalledRef = useRef(false);
 
-  /* ---------------- INIT AGORA CLIENT ---------------- */
+  const navigate = useNavigate();
+
+  const [createToken] = useGenerateRoomTokenMutation();
+  const [startRecording] = useStartRecordingMutation();
+  const [stopRecording] = useStopRecordingMutation();
+
+  /* ---------------- load saved info ---------------- */
+  useEffect(() => {
+    const ch = localStorage.getItem("className");
+    const r = localStorage.getItem("role");
+    const cd = JSON.parse(localStorage.getItem("classDetails") || "null");
+    setChannelName(ch);
+    setRole(r);
+    setClassDetails(cd);
+
+    if (r === "host") {
+      const stored = JSON.parse(localStorage.getItem("recordingInfo") || "null");
+      if (stored) {
+        setRecordingInfo(stored);
+        setIsRecording(true);
+      }
+    }
+  }, []);
+
+  /* ---------------- init Agora ---------------- */
   useEffect(() => {
     client.current = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
     return () => {
@@ -26,68 +65,106 @@ function WhiteBoard() {
     };
   }, []);
 
-  /* ---------------- AUTO JOIN ---------------- */
-  useEffect(() => {
-    const savedChannel = localStorage.getItem("className");
-    const savedRole = localStorage.getItem("role");
-    if (savedChannel && savedRole) {
-      setChannelName(savedChannel);
-      setRole(savedRole);
-      setTimeout(() => joinClass(savedChannel, savedRole), 200);
-    }
-  }, []);
-
-  /* ---------------- TOKEN FETCHER ---------------- */
-  const getToken = async (chName) => {
+  /* ---------------- get token ---------------- */
+  const getToken = async (classCode) => {
     const uid = Math.floor(Math.random() * 100000);
-    const res = await createRoom({ channelName: chName, uid, role }).unwrap();
+    const res = await createToken({ classCode, uid, role }).unwrap();
     return { token: res.token, uid };
   };
 
-  /* ---------------- JOIN CLASS ---------------- */
-  const joinClass = async (chName = channelName, userRole = role) => {
-    if (!chName) return alert("Enter Room Name");
+  /* ---------------- start recording ---------------- */
+  const startRecordingHandler = async () => {
+    if (isRecording) return;
+    try {
+      const payload = {
+        channelName: localStorage.getItem("classCode") || classDetails?.roomId,
+      };
+      const res = await startRecording(payload);
+      const data = res?.data ?? res;
+      if (data && data.resourceId && data.sid) {
+        setRecordingInfo(data);
+        localStorage.setItem("recordingInfo", JSON.stringify(data));
+        setIsRecording(true);
+        console.log("Recording started:", data);
+      }
+    } catch (err) {
+      console.error("startRecordingHandler error:", err);
+    }
+  };
 
-    const { token, uid } = await getToken(chName);
+  /* ---------------- stop recording ---------------- */
+  const stopRecordingHandler = async () => {
+    try {
+      const info = recordingInfo || JSON.parse(localStorage.getItem("recordingInfo") || "null");
+      if (!info || !info.resourceId || !info.sid) return;
+      const req = {
+        resourceId: info.resourceId,
+        sid: info.sid,
+        channelName: localStorage.getItem("classCode") || classDetails?.roomId,
+      };
+      const res = await stopRecording(req);
+      const data = res?.data ?? res;
+      setIsRecording(false);
+      setRecordingInfo(null);
+      localStorage.removeItem("recordingInfo");
 
-    localStorage.setItem("className", chName);
-    localStorage.setItem("role", userRole);
+      if (data?.recordingUrl) {
+        const open = window.confirm("Recording saved. Open now?");
+        if (open) window.open(data.recordingUrl, "_blank");
+      } else if (data?.message) {
+        window.alert(`Stop result: ${data.message}`);
+      }
+      return data;
+    } catch (err) {
+      console.error("stopRecordingHandler error:", err);
+      setIsRecording(false);
+      return null;
+    }
+  };
+
+  /* ---------------- join class ---------------- */
+  const joinClass = async (classCode = classDetails?.roomId, userRole = role) => {
+    if (!classCode) return alert("Enter Room Code");
+
+    const { token, uid } = await getToken(classCode);
+    localStorage.setItem("classCode", classCode);
+    localStorage.setItem("uid", uid);
 
     try {
-      await client.current.setClientRole("host");
+      if (userRole === "host") await client.current.setClientRole("host");
     } catch {}
 
     await client.current.join(
-      import.meta.env.VITE_AGORA_APP_ID || "143ec8542abf4df2851d3df3b69f2d89",
-      chName,
+      import.meta.env.VITE_AGORA_APP_ID || "YOUR_AGORA_APP_ID",
+      classCode,
       token,
       uid
     );
 
-    let audioTrack = null,
-      videoTrack = null;
-
+    // create tracks
     try {
       const tracks = await AgoraRTC.createMicrophoneAndCameraTracks();
-      audioTrack = tracks[0];
-      videoTrack = tracks[1];
-      localTracksRef.current.audio = audioTrack;
-      localTracksRef.current.video = videoTrack;
+      localTracksRef.current.audio = tracks[0];
+      localTracksRef.current.video = tracks[1];
     } catch {
       try {
-        audioTrack = await AgoraRTC.createMicrophoneAudioTrack();
-        localTracksRef.current.audio = audioTrack;
+        localTracksRef.current.audio = await AgoraRTC.createMicrophoneAudioTrack();
       } catch {}
     }
 
+    // publish local tracks
     const publishList = [];
-    if (localTracksRef.current.audio)
-      publishList.push(localTracksRef.current.audio);
-    if (localTracksRef.current.video)
-      publishList.push(localTracksRef.current.video);
+    if (localTracksRef.current.audio) publishList.push(localTracksRef.current.audio);
+    if (localTracksRef.current.video) publishList.push(localTracksRef.current.video);
+    if (publishList.length > 0) {
+      try {
+        await client.current.publish(publishList);
+      } catch (e) {
+        console.warn("publish failed", e);
+      }
+    }
 
-    if (publishList.length > 0) await client.current.publish(publishList);
-
+    // add local participant
     const localName = userRole === "host" ? "Mentor (You)" : "Student (You)";
     setParticipants((p) => [
       ...p.filter((x) => x.uid !== uid),
@@ -100,58 +177,75 @@ function WhiteBoard() {
       },
     ]);
 
+    // play local video
     setTimeout(() => {
-      if (localTracksRef.current.video && localContainerRef.current) {
-        try {
+      try {
+        if (localTracksRef.current.video && localContainerRef.current) {
           localTracksRef.current.video.play(localContainerRef.current);
-        } catch {}
-      }
-    }, 250);
+        }
+      } catch {}
+    }, 200);
 
     setJoined(true);
 
-    /* ---------------- REMOTE EVENTS ---------------- */
-
+    /* ---------------- handle remote users ---------------- */
     client.current.on("user-published", async (user, mediaType) => {
       await client.current.subscribe(user, mediaType);
 
-      setParticipants((prev) => [
-        ...prev.filter((x) => x.uid !== user.uid),
-        {
+      setParticipants((prev) => {
+        const exists = prev.some((p) => p.uid === user.uid);
+        const entry = {
           uid: user.uid,
           name: user.role === "host" ? "Mentor" : "Student",
           hasVideo: !!user.videoTrack,
           hasAudio: !!user.audioTrack,
           raised: false,
-        },
-      ]);
+        };
+        if (exists) return prev.map((p) => (p.uid === user.uid ? { ...p, ...entry } : p));
+        return [...prev, entry];
+      });
 
       setTimeout(() => {
         const el = containersRef.current[user.uid];
-        try {
-          if (mediaType === "video" && user.videoTrack && el)
-            user.videoTrack.play(el);
-          if (mediaType === "audio" && user.audioTrack) user.audioTrack.play();
-        } catch {}
+        if (!el) return;
+        if (mediaType === "video" && user.videoTrack) user.videoTrack.play(el);
+        if (mediaType === "audio" && user.audioTrack) user.audioTrack.play?.();
       }, 150);
     });
 
-    client.current.on("user-unpublished", (user) => {
-      setParticipants((prev) => prev.filter((x) => x.uid !== user.uid));
-      if (containersRef.current[user.uid]) {
-        containersRef.current[user.uid].innerHTML = "";
-      }
+    client.current.on("user-unpublished", (user, mediaType) => {
+      if (!user) return;
+      setParticipants((prev) =>
+        prev.map((p) =>
+          p.uid === user.uid
+            ? {
+                ...p,
+                hasVideo: mediaType === "video" ? false : p.hasVideo,
+                hasAudio: mediaType === "audio" ? false : p.hasAudio,
+              }
+            : p
+        )
+      );
     });
 
     client.current.on("user-left", (user) => {
-      setParticipants((prev) => prev.filter((x) => x.uid !== user.uid));
-      if (containersRef.current[user.uid]) {
-        containersRef.current[user.uid].innerHTML = "";
-      }
+      if (!user) return;
+      setParticipants((prev) => prev.filter((p) => p.uid !== user.uid));
+      delete containersRef.current[user.uid];
     });
+
+    // host auto start recording
+    if (userRole === "host") {
+      (async () => {
+        if (!startRecordingCalledRef.current) {
+          startRecordingCalledRef.current = true;
+          await startRecordingHandler();
+        }
+      })();
+    }
   };
 
-  /* ---------------- MIC ---------------- */
+  /* ---------------- toggles ---------------- */
   const toggleMic = async () => {
     const audio = localTracksRef.current.audio;
     if (!audio) {
@@ -164,7 +258,6 @@ function WhiteBoard() {
       }
       return;
     }
-
     audio.setEnabled(!audio.enabled);
     setParticipants((p) =>
       p.map((x) =>
@@ -173,25 +266,19 @@ function WhiteBoard() {
     );
   };
 
-  /* ---------------- CAMERA ---------------- */
   const toggleCam = async () => {
     const video = localTracksRef.current.video;
-
     if (!video) {
       try {
         const cam = await AgoraRTC.createCameraVideoTrack();
         localTracksRef.current.video = cam;
         await client.current.publish(cam);
-
-        setTimeout(() => {
-          if (localContainerRef.current) cam.play(localContainerRef.current);
-        }, 200);
+        setTimeout(() => cam.play(localContainerRef.current), 200);
       } catch {
         alert("Camera permission blocked.");
       }
       return;
     }
-
     video.setEnabled(!video.enabled);
     setParticipants((p) =>
       p.map((x) =>
@@ -200,28 +287,18 @@ function WhiteBoard() {
     );
   };
 
-  /* ---------------- SCREEN SHARE ---------------- */
   const toggleScreen = async () => {
     if (!localTracksRef.current.screen) {
       try {
-        const screenTrack = await AgoraRTC.createScreenVideoTrack({
-          encoderConfig: "1080p",
-        });
-
+        const screenTrack = await AgoraRTC.createScreenVideoTrack({ encoderConfig: "1080p" });
         localTracksRef.current.screen = screenTrack;
-
-        await client.current.unpublish(localTracksRef.current.video || []);
+        if (localTracksRef.current.video) await client.current.unpublish(localTracksRef.current.video);
         await client.current.publish(screenTrack);
-
-        setTimeout(() => {
-          if (localContainerRef.current)
-            screenTrack.play(localContainerRef.current);
-        }, 200);
+        setTimeout(() => screenTrack.play(localContainerRef.current), 200);
 
         screenTrack.on("track-ended", async () => {
-          await client.current.unpublish(screenTrack);
+          try { await client.current.unpublish(screenTrack); } catch {}
           localTracksRef.current.screen = null;
-
           if (localTracksRef.current.video) {
             await client.current.publish(localTracksRef.current.video);
             localTracksRef.current.video.play(localContainerRef.current);
@@ -231,10 +308,9 @@ function WhiteBoard() {
         alert("Screen share blocked.");
       }
     } else {
-      await client.current.unpublish(localTracksRef.current.screen);
-      localTracksRef.current.screen.close();
+      try { await client.current.unpublish(localTracksRef.current.screen); } catch {}
+      try { localTracksRef.current.screen.close(); } catch {}
       localTracksRef.current.screen = null;
-
       if (localTracksRef.current.video) {
         await client.current.publish(localTracksRef.current.video);
         localTracksRef.current.video.play(localContainerRef.current);
@@ -242,336 +318,111 @@ function WhiteBoard() {
     }
   };
 
-  /* ---------------- RAISE HAND ---------------- */
   const toggleRaise = (uid) => {
     setParticipants((p) =>
       p.map((x) => (x.uid === uid ? { ...x, raised: !x.raised } : x))
     );
   };
 
-  /* ---------------- REQUEST TO JOIN (STUDENT) ---------------- */
-  const requestToJoin = async () => {
-    try {
-      await fetch("/api/room/request", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          channelName,
-          studentName: "Student",
-        }),
-      });
-      alert("Request Sent");
-    } catch {
-      alert("Request failed.");
-    }
-  };
-
-  /* ---------------- LEAVE ---------------- */
+  /* ---------------- leave class ---------------- */
   const leaveClass = async () => {
     try {
+      if (role === "host" && recordingInfo) await stopRecordingHandler();
       await client.current.leave();
-    } catch {}
-
+    } catch (e) {}
     Object.values(localTracksRef.current).forEach((t) => {
-      try {
-        t.stop();
-        t.close();
-      } catch {}
+      try { t?.stop?.(); t?.close?.(); } catch {}
     });
-
     setParticipants([]);
-    localTracksRef.current = {};
+    localTracksRef.current = { audio: null, video: null, screen: null };
     setJoined(false);
-    localStorage.removeItem("className");
-    localStorage.removeItem("role");
+    localStorage.clear();
+    if (role === "host") navigate("/createClass");
+    else navigate("/");
   };
 
-  /* ---------------- RENDER TILE ---------------- */
+  /* ---------------- render video tiles ---------------- */
   const renderTile = (p) => {
-    const isLocal = p.name.includes("(You)");
+    const isLocal = String(p.name).includes("(You)");
+    const isVideoOn = isLocal
+      ? !!localTracksRef.current.video && localTracksRef.current.video.enabled
+      : !!p.hasVideo;
 
     return (
-      <div key={p.uid} style={styles.videoBox}>
+      <div key={p.uid} className="relative bg-black/20 rounded-lg overflow-hidden border border-white/10">
+        {!isVideoOn && (
+          <div className="absolute inset-0 bg-black flex items-center justify-center z-10 text-white font-semibold">
+            Camera Off
+          </div>
+        )}
         <div
           ref={(el) => {
-            if (isLocal) localContainerRef.current = el;
             containersRef.current[p.uid] = el;
+            if (isLocal) localContainerRef.current = el;
           }}
-          style={styles.video}
+          className="w-full h-full"
         />
-
-        <div style={styles.nameRow}>
-          <span style={styles.nameTag}>{p.name}</span>
-
-          <div style={{ display: "flex", gap: 6 }}>
-            {p.hasAudio ? (
-              <span style={styles.badge}>🔊</span>
-            ) : (
-              <span style={styles.badgeOff}>🔇</span>
-            )}
-
-            {p.hasVideo ? (
-              <span style={styles.badge}>🎥</span>
-            ) : (
-              <span style={styles.badgeOff}>📷</span>
-            )}
-
-            <button
-              onClick={() => toggleRaise(p.uid)}
-              style={p.raised ? styles.raisedBtn : styles.raiseBtn}
-            >
-              ✋
-            </button>
+        <div className="absolute bottom-0 w-full px-2 py-1 bg-black/50 flex items-center justify-between text-xs">
+          <span>{p.name}</span>
+          <div className="flex gap-2">
+            {p.hasAudio ? <span>🔊</span> : <span className="opacity-40">🔇</span>}
+            {isVideoOn ? <span>🎥</span> : <span className="opacity-40">📷</span>}
+            <button onClick={() => toggleRaise(p.uid)} className={`px-1 rounded ${p.raised ? "bg-yellow-400/40" : "bg-white/20"}`}>✋</button>
           </div>
         </div>
       </div>
     );
   };
 
+  /* ---------------- auto-join ---------------- */
+  useEffect(() => {
+    const savedChannel = localStorage.getItem("className");
+    const savedRole = localStorage.getItem("role");
+    const cd = JSON.parse(localStorage.getItem("classDetails") || "null");
+    if (savedChannel && savedRole) {
+      setChannelName(savedChannel);
+      setRole(savedRole);
+      setClassDetails(cd);
+      setTimeout(() => joinClass(cd?.roomId, savedRole), 200);
+    }
+  }, []);
+
   /* ---------------- UI ---------------- */
   return (
-    <div style={styles.page}>
-      {!joined ? (
-        /* ---------------- JOIN SCREEN ---------------- */
-        <div style={styles.joinCard}>
-          <h1 style={styles.heading}>🎥 Live Class</h1>
-          <p style={styles.sub}>Join by room name</p>
-
-          <input
-            value={channelName}
-            onChange={(e) => setChannelName(e.target.value)}
-            placeholder="Room name"
-            style={styles.input}
-          />
-
-          <select
-            value={role}
-            onChange={(e) => setRole(e.target.value)}
-            style={styles.select}
-          >
-            <option value="host">Mentor</option>
-            <option value="student">Student</option>
-          </select>
-
-          <div style={{ display: "flex", gap: 10 }}>
-            <button onClick={() => joinClass()} style={styles.joinBtn}>
-              Join
-            </button>
-
-            {role === "student" && (
-              <button onClick={requestToJoin} style={styles.requestBtn}>
-                Request
-              </button>
-            )}
-          </div>
+    <div className="h-screen w-full bg-[#0a0f1f] text-white flex flex-col font-inter">
+      <header className="w-full h-16 bg-black/20 backdrop-blur-xl border-b border-white/10 flex items-center justify-between px-6 fixed top-0 z-40">
+        <div className="flex flex-col leading-tight">
+          <span className="text-sm opacity-70">Class</span>
+          <span className="text-lg font-semibold tracking-wide">{channelName}</span>
         </div>
-      ) : (
-        /* ---------------- CLASSROOM ---------------- */
-        <div style={styles.classRoom}>
-          {/* TOP BAR */}
-          <div style={styles.topBar}>
-            <span>
-              Class: <b>{channelName}</b>
-            </span>
+        <div className="flex items-center gap-6">
+          <div className="text-right">
+            <span className="text-xs opacity-60 block">Class Code</span>
+            <span className="font-semibold">{classDetails?.roomId}</span>
           </div>
-
-          {/* VIDEO GRID */}
-          <div style={styles.grid}>{participants.map(renderTile)}</div>
-
-          {/* BOTTOM CONTROL BAR */}
-          <div style={styles.bottomControls}>
-            <button style={styles.controlBtn} onClick={toggleMic}>
-              🎤
-            </button>
-            <button style={styles.controlBtn} onClick={toggleCam}>
-              📷
-            </button>
-            <button style={styles.controlBtn} onClick={toggleScreen}>
-              🖥️
-            </button>
-            <button style={styles.leaveBtnCircle} onClick={leaveClass}>
-              ⏹
-            </button>
-          </div>
+          {isRecording && (
+            <div className="flex items-center gap-2 bg-red-600/90 px-3 py-1 rounded-full text-xs shadow-md animate-pulse">
+              <div className="w-2 h-2 bg-white rounded-full" />
+              Recording
+            </div>
+          )}
         </div>
-      )}
+      </header>
+
+      <main className="flex-1 pt-20 pb-28 px-6 overflow-y-auto">
+        <div className="grid gap-5 auto-rows-[300px] grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
+          {participants.map(renderTile)}
+        </div>
+      </main>
+
+      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40">
+        <div className="flex items-center gap-5 bg-black/50 backdrop-blur-xl px-8 py-4 rounded-2xl border border-white/10 shadow-lg">
+          <button onClick={toggleMic} className="w-14 h-14 flex items-center justify-center rounded-full bg-white/10 border border-white/20 text-2xl hover:bg-white/20 transition">🎤</button>
+          <button onClick={toggleCam} className="w-14 h-14 flex items-center justify-center rounded-full bg-white/10 border border-white/20 text-2xl hover:bg-white/20 transition">📷</button>
+          <button onClick={toggleScreen} className="w-14 h-14 flex items-center justify-center rounded-full bg-white/10 border border-white/20 text-2xl hover:bg-white/20 transition">🖥️</button>
+          <button onClick={leaveClass} className="w-14 h-14 flex items-center justify-center rounded-full bg-red-600 text-white text-2xl hover:bg-red-700 transition shadow-lg">⏹</button>
+        </div>
+      </div>
     </div>
   );
 }
-
-/* ---------------- PREMIUM UI STYLES ---------------- */
-const styles = {
-  page: {
-    height: "100vh",
-    background: "linear-gradient(135deg, #0b1120, #1e293b, #0b1120)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    color: "#fff",
-    fontFamily: "Inter",
-  },
-
-  joinCard: {
-    width: 420,
-    padding: 30,
-    borderRadius: 20,
-    background: "rgba(255,255,255,0.08)",
-    backdropFilter: "blur(20px)",
-    border: "1px solid rgba(255,255,255,0.15)",
-    boxShadow: "0 10px 40px rgba(0,0,0,0.4)",
-  },
-
-  heading: { fontSize: 28, marginBottom: 10 },
-  sub: { opacity: 0.7, marginBottom: 20 },
-
-  input: {
-    width: "100%",
-    padding: 14,
-    marginBottom: 14,
-    borderRadius: 12,
-    background: "rgba(255,255,255,0.1)",
-    border: "1px solid rgba(255,255,255,0.2)",
-    color: "#fff",
-  },
-
-  select: {
-    width: "100%",
-    padding: 14,
-    marginBottom: 14,
-    borderRadius: 12,
-    background: "rgba(255,255,255,0.1)",
-    border: "1px solid rgba(255,255,255,0.2)",
-    color: "#fff",
-  },
-
-  joinBtn: {
-    flex: 1,
-    padding: 14,
-    borderRadius: 12,
-    background: "#2563eb",
-    color: "#fff",
-    border: "none",
-    fontWeight: 600,
-    cursor: "pointer",
-  },
-
-  requestBtn: {
-    flex: 1,
-    padding: 14,
-    borderRadius: 12,
-    background: "rgba(255,255,255,0.2)",
-    color: "#fff",
-    border: "1px solid rgba(255,255,255,0.3)",
-    cursor: "pointer",
-  },
-
-  /* CLASSROOM */
-  classRoom: { height: "100%", width: "100%", position: "relative" },
-
-  topBar: {
-    position: "absolute",
-    top: 15,
-    left: "50%",
-    transform: "translateX(-50%)",
-    padding: "10px 24px",
-    borderRadius: 16,
-    background: "rgba(255,255,255,0.1)",
-    backdropFilter: "blur(12px)",
-    border: "1px solid rgba(255,255,255,0.2)",
-    zIndex: 20,
-  },
-
-  grid: {
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
-    gap: 20,
-    padding: 30,
-    marginTop: 80,
-  },
-
-  videoBox: {
-    position: "relative",
-    background: "rgba(255,255,255,0.06)",
-    backdropFilter: "blur(10px)",
-    borderRadius: 16,
-    overflow: "hidden",
-    height: 230,
-    border: "1px solid rgba(255,255,255,0.12)",
-  },
-
-  video: { width: "100%", height: "100%", background: "#000" },
-
-  nameRow: {
-    position: "absolute",
-    bottom: 0,
-    width: "100%",
-    padding: "8px 12px",
-    background: "rgba(0,0,0,0.5)",
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-
-  nameTag: { fontSize: 14 },
-
-  badge: { fontSize: 16 },
-  badgeOff: { fontSize: 16, opacity: 0.4 },
-
-  raiseBtn: {
-    background: "rgba(255,255,255,0.2)",
-    border: "none",
-    color: "#fff",
-    borderRadius: 8,
-    padding: "4px 8px",
-    cursor: "pointer",
-  },
-
-  raisedBtn: {
-    background: "rgba(255,200,0,0.4)",
-    border: "none",
-    color: "#fff",
-    borderRadius: 8,
-    padding: "4px 8px",
-    cursor: "pointer",
-  },
-
-  /* BOTTOM CONTROL BAR */
-  bottomControls: {
-    position: "absolute",
-    bottom: 25,
-    left: "50%",
-    transform: "translateX(-50%)",
-    display: "flex",
-    gap: 20,
-    background: "rgba(0,0,0,0.45)",
-    padding: "14px 25px",
-    borderRadius: 20,
-    backdropFilter: "blur(16px)",
-    border: "1px solid rgba(255,255,255,0.12)",
-    zIndex: 20,
-  },
-
-  controlBtn: {
-    width: 55,
-    height: 55,
-    borderRadius: "50%",
-    border: "1px solid rgba(255,255,255,0.25)",
-    background: "rgba(255,255,255,0.12)",
-    fontSize: 26,
-    cursor: "pointer",
-    color: "#fff",
-  },
-
-  leaveBtnCircle: {
-    width: 55,
-    height: 55,
-    borderRadius: "50%",
-    fontSize: 26,
-    background: "#dc2626",
-    border: "none",
-    color: "#fff",
-    cursor: "pointer",
-  },
-};
-
-export default WhiteBoard;
